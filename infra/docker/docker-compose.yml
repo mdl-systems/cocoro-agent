@@ -1,0 +1,53 @@
+# cocoro-agent — Docker Compose
+# cocoro-coreのcocoro-networkに参加して、DBとRedisを共有する
+
+services:
+  cocoro-agent:
+    build:
+      context: ../../ # repo root
+      dockerfile: infra/docker/Dockerfile
+    container_name: cocoro-agent
+    ports:
+      - "${AGENT_PORT:-8002}:8002"
+    environment:
+      # cocoro-coreとの接続（Docker内部通信）
+      - COCORO_CORE_URL=${COCORO_CORE_URL:-http://cocoro-core:8000}
+      # 認証（cocoro-coreと同じキーを使用）
+      - COCORO_API_KEY=${COCORO_API_KEY:-cocoro-dev-2026}
+      # このサービスのポート
+      - AGENT_PORT=${AGENT_PORT:-8002}
+      # Webhook署名
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET:-cocoro-webhook-secret}
+      # 共有インフラ（cocoro-coreと同じDB・Redis）
+      - DATABASE_URL=postgresql://cocoro:${POSTGRES_PASSWORD:-cocoro_secret}@cocoro-postgres:5432/cocoro_db
+      - REDIS_URL=redis://cocoro-redis:6379/0
+      # Logging
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    networks:
+      - cocoro-network # cocoro-coreのネットワークに参加
+    depends_on:
+      - cocoro-core-check
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8002/health" ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    mem_limit: 512m
+    cpus: 0.5
+    restart: unless-stopped
+
+  # cocoro-coreが起動しているか確認するダミーサービス
+  cocoro-core-check:
+    image: curlimages/curl:latest
+    command: >
+      sh -c "until curl -sf http://cocoro-core:8000/health; do
+        echo 'Waiting for cocoro-core...'; sleep 3; done;
+        echo 'cocoro-core is ready'"
+    networks:
+      - cocoro-network
+    restart: "no"
+
+networks:
+  cocoro-network:
+    external: true # cocoro-coreのdocker-composeが作成したネットワークを使用

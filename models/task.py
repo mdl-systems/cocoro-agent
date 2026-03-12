@@ -10,10 +10,38 @@ from pydantic import BaseModel, Field
 # === Enums ===
 
 class TaskStatus(str, Enum):
+    # 基本ステータス
     QUEUED    = "queued"
     RUNNING   = "running"
     COMPLETED = "completed"
     FAILED    = "failed"
+    # 拡張ステータス（Phase 5）
+    READY_FOR_REVIEW   = "ready_for_review"    # レビュー待ち
+    AWAITING_APPROVAL  = "awaiting_approval"   # 承認待ち
+    CREATING_ARTIFACT  = "creating_artifact"   # 成果物作成中
+    COMPLETE           = "complete"             # 完了（アーカイブ済み）
+
+
+# 日本語ステータスラベル
+STATUS_LABEL: dict[str, str] = {
+    "queued":            "投入済み",
+    "running":           "実行中",
+    "completed":         "完了",
+    "failed":            "エラー",
+    "ready_for_review":  "レビュー待ち",
+    "awaiting_approval": "承認待ち",
+    "creating_artifact": "成果物作成中",
+    "complete":          "完了（アーカイブ）",
+}
+
+# 「アクティブ」グループに属するステータス
+ACTIVE_STATUSES = {
+    "queued", "running",
+    "ready_for_review", "awaiting_approval", "creating_artifact",
+}
+
+# 「完了」グループに属するステータス
+COMPLETE_STATUSES = {"completed", "complete", "failed"}
 
 
 class TaskType(str, Enum):
@@ -94,6 +122,61 @@ class TaskListResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+# グループ化タスク一覧フォーマット（Phase 5）
+
+class GroupedTaskItem(BaseModel):
+    id: str
+    title: str
+    status: str
+    status_label: str
+    role: Optional[str] = None
+    role_name: Optional[str] = None
+    progress: int = 0
+    current_step: Optional[str] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    result: Optional[Any] = None
+    error: Optional[str] = None
+
+
+class GroupedTaskResponse(BaseModel):
+    """アクティブ/完了 でグループ化されたタスク一覧"""
+    active: list[GroupedTaskItem] = []
+    complete: list[GroupedTaskItem] = []
+    total_active: int = 0
+    total_complete: int = 0
+
+
+# 意図確認（clarify）モデル（Phase 5）
+
+class ClarifyOption(BaseModel):
+    key: str
+    label: str
+    options: list[str] = []
+
+
+class ClarifyRequest(BaseModel):
+    title: str = Field(..., description="タスクタイトル")
+    role_id: Optional[str] = Field(None, description="専門職ロールID")
+    description: Optional[str] = Field(None, description="タスクの詳細")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "title": "Q4レポートをスライドに変換",
+                "role_id": "researcher"
+            }
+        }
+
+
+class ClarifyResponse(BaseModel):
+    title: str
+    role_id: Optional[str] = None
+    questions: list[ClarifyOption]
+    suggested_type: Optional[str] = None
+    ready_to_submit: bool = False
 
 
 # === SSE event payloads ===

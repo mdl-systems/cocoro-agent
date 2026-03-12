@@ -17,6 +17,14 @@ from models.task import (
     TaskResponse,
     TaskResultResponse,
     TaskStatus,
+    GroupedTaskItem,
+    GroupedTaskResponse,
+    ClarifyRequest,
+    ClarifyResponse,
+    ClarifyOption,
+    STATUS_LABEL,
+    ACTIVE_STATUSES,
+    COMPLETE_STATUSES,
     PRIORITY_MAP,
 )
 from api.middleware import verify_api_key
@@ -101,12 +109,15 @@ async def create_task(
 @router.get("", response_model=TaskListResponse)
 async def list_tasks(
     request: Request,
-    status: Optional[str] = Query(None, description="フィルタ: queued/running/completed/failed"),
+    status: Optional[str] = Query(
+        None,
+        description="ステータスフィルタ: queued/running/completed/failed/ready_for_review/awaiting_approval/creating_artifact/complete"
+    ),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     _: str = Depends(verify_api_key),
 ):
-    """タスク一覧を取得"""
+    """タスク一覧を取得。status フィルター対応。"""
     runner = request.app.state.task_runner
     rows, total = await runner.list_tasks(status=status, limit=limit, offset=offset)
     return TaskListResponse(
@@ -115,6 +126,155 @@ async def list_tasks(
         limit=limit,
         offset=offset,
     )
+
+
+# ── GET /tasks/grouped ────────────────────────────────────────────
+
+@router.get("/grouped", response_model=GroupedTaskResponse,
+            summary="グループ化タスク一覧",
+            description="アクティブ(実行中・待機) / 完了(終了・失敗) の2グループに分けたタスク一覧。"
+                        "UIのタスクダッシュボード表示向け。")
+async def list_tasks_grouped(
+    request: Request,
+    limit_active: int = Query(20, ge=1, le=100, description="アクティブグループの上限件数"),
+    limit_complete: int = Query(20, ge=1, le=100, description="完了グループの上限件数"),
+    _: str = Depends(verify_api_key),
+):
+    runner = request.app.state.task_runner
+
+    # 全タスクを取得（大めの上限で一度取得）
+    rows, _ = await runner.list_tasks(status=None, limit=limit_active + limit_complete, offset=0)
+
+    active_items: list[GroupedTaskItem] = []
+    complete_items: list[GroupedTaskItem] = []
+
+    for row in rows:
+        s = str(row.get("status", "queued"))
+        item = GroupedTaskItem(
+            id=str(row["id"]),
+            title=row.get("title", ""),
+            status=s,
+            status_label=STATUS_LABEL.get(s, s),
+            role=row.get("agent_type"),
+            progress=row.get("progress") or 0,
+            current_step=row.get("current_step"),
+            started_at=row.get("updated_at") if s == "running" else None,
+            completed_at=row.get("completed_at"),
+            error=row.get("error"),
+        )
+        if s in ACTIVE_STATUSES:
+            if len(active_items) < limit_active:
+                active_items.append(item)
+        else:  # COMPLETE_STATUSES またはきれい気なステータス
+            if len(complete_items) < limit_complete:
+                complete_items.append(item)
+
+    return GroupedTaskResponse(
+        active=active_items,
+        complete=complete_items,
+        total_active=len(active_items),
+        total_complete=len(complete_items),
+    )
+
+
+# ── POST /tasks/clarify ──────────────────────────────────────────
+
+# ロール別の推奨質問定義
+ROLE_QUESTIONS: dict[str, list[dict]] = {
+    "lawyer": [
+        {"key": "doc_type",  "label": "文書の種類は？",
+         "options": ["契約書", "NDA", "就業規則", "利用規約", "その他"]},
+        {"key": "urgency",  "label": "緊急度は？",
+         "options": ["今日中", "2〜3日以内", "1週間以内", "放置可"]},
+    ],
+    "accountant": [
+        {"key": "entity",   "label": "対象は？",
+         "options": ["個人（確定申告）", "法人", "フリーランス", "属定申告"]},
+        {"key": "tax_type", "label": "税の種類は？",
+         "options": ["所得税", "法人税", "消費税", "相続税", "消費税以外"]},
+    ],
+    "researcher": [
+        {"key": "audience", "label": "対象オーディエンスは？",
+         "options": ["取締役会", "投資家", "社内共有", "学術・研究", "その他"]},
+        {"key": "depth",    "label": "リサーチの深さは？",
+         "options": ["概要（3行まとめ）", "標準（A4一枚）", "詳細（レポート形式）"]},
+    ],
+    "engineer": [
+        {"key": "lang",     "label": "プログラミング言語は？",
+         "options": ["Python", "TypeScript", "Go", "Rust", "その他"]},
+        {"key": "focus",    "label": "重点は？",
+         "options": ["セキュリティ", "パフォーマンス", "保守性", "全項レビュー"]},
+    ],
+    "financial_advisor": [
+        {"key": "horizon",  "label": "投資期間は？",
+         "options": ["短期（３年以内）", "中期（3〜10年）", "長期（10年以上）"]},
+        {"key": "risk",     "label": "リスク許容度は？",
+         "options": ["元本確保型", "バランス型", "積極成長型"]},
+    ],
+    "medical_advisor": [
+        {"key": "symptom_duration", "label": "症状はいつから？",
+         "options": ["今日から", "2〜3日前", "1週間以上", "1ヶ月以上"]},
+        {"key": "severity",       "label": "痛み・苦痛の度合いは？",
+         "options": ["軽度（証卒なし）", "中度（日常生活に支障）", "重度（活動挙けない）"]},
+    ],
+}
+
+# タイトルキーワードからタスクタイプを推醒
+DEFAULT_QUESTIONS: list[dict] = [
+    {"key": "output_format", "label": "成果物の形式は？",
+     "options": ["箇条書き", "レポート（雲文）", "スライド", "スプレッドシート", "そのまま"]},
+    {"key": "length",        "label": "必要な長さは？",
+     "options": ["簡潔（3行以内）", "標準（A4一枚相当）", "詳細（数ページ）"]},
+]
+
+
+def _suggest_task_type(title: str) -> str:
+    """タイトルの単純キーワードマッチングでタスクタイプを推定"""
+    title_l = title.lower()
+    if any(k in title_l for k in ["リサーチ", "調査", "research", "まとめ", "news"]):
+        return "research"
+    if any(k in title_l for k in ["コード", "code", "レビュー", "review", "バグ", "bug"]):
+        return "analyze"
+    if any(k in title_l for k in ["書く", "作成", "ライティング", "write", "スライド", "変換"]):
+        return "write"
+    return "auto"
+
+
+@router.post("/clarify", response_model=ClarifyResponse,
+             summary="タスク実行前の意図確認",
+             description="タスクを投入する前に、ロールやタイトルに応じた質問リストを返します。"
+                        "UI のタスク作成フローに組み込んで、ユーザーの意図を先に整理できます。")
+async def clarify_task(
+    body: ClarifyRequest,
+    _: str = Depends(verify_api_key),
+):
+    """タスクの意図確認質問を返す。ロール別 + 共通質問の組み合わせ。"""
+    role_id = body.role_id
+    suggested_type = _suggest_task_type(body.title)
+
+    # ロール固有の質問
+    role_qs = ROLE_QUESTIONS.get(role_id or "", [])
+
+    # 共通質問（ロール固有質問が少ない場合だけ追加）
+    common_qs = DEFAULT_QUESTIONS if len(role_qs) < 2 else []
+
+    all_qs = role_qs + common_qs
+    questions = [
+        ClarifyOption(key=q["key"], label=q["label"], options=q["options"])
+        for q in all_qs
+    ]
+
+    # 質問が0件の場合は即時投入可能フラグ
+    ready = len(questions) == 0
+
+    return ClarifyResponse(
+        title=body.title,
+        role_id=role_id,
+        questions=questions,
+        suggested_type=suggested_type,
+        ready_to_submit=ready,
+    )
+
 
 
 # ── GET /tasks/{task_id} ──────────────────────────────────────────────────

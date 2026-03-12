@@ -71,7 +71,7 @@ async def create_task(
 
     priority = PRIORITY_MAP.get(body.priority, 5)
 
-    await runner.submit_task(
+    result = await runner.submit_task(
         task_id=task_id,
         title=body.title,
         description=body.description or "",
@@ -85,8 +85,15 @@ async def create_task(
     if not task:
         raise HTTPException(500, "Task creation failed")
 
-    logger.info("Task created: %s → %s", task_id[:8], agent_type)
-    return _row_to_task_response(task)
+    logger.info("Task created: %s → %s (role=%s)",
+                task_id[:8], agent_type, body.role_id or "none")
+
+    resp = _row_to_task_response(task)
+    # submit_taskの返り値からロール情報を追加
+    # （DBには保存されていないため，submit返却値から直接取得）
+    resp.role_id   = result.get("role_id")
+    resp.role_name = result.get("role_name")
+    return resp
 
 
 # ── GET /tasks ────────────────────────────────────────────────────────────

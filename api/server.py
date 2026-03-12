@@ -12,10 +12,11 @@ import asyncpg
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routes import tasks, agents, org, webhook, stats, personality, roles
+from api.routes import tasks, agents, org, webhook, stats, personality, roles, schedules
 from core.task_runner import TaskRunner
 from core.agent_proxy import AgentProxy
 from core.webhook import WebhookSender
+from core.scheduler import TaskScheduler
 
 # ── Logging ──────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -96,16 +97,22 @@ async def lifespan(app: FastAPI):
     )
     sender = WebhookSender(db=pool, webhook_secret=WEBHOOK_SECRET)
 
+    # タスクスケジューラー起動
+    task_scheduler = TaskScheduler(db=pool, task_runner=runner)
+    await task_scheduler.start()
+
     # Attach to app state
-    app.state.db          = pool
-    app.state.task_runner = runner
-    app.state.agent_proxy = proxy
+    app.state.db             = pool
+    app.state.task_runner    = runner
+    app.state.agent_proxy    = proxy
     app.state.webhook_sender = sender
+    app.state.scheduler      = task_scheduler
 
     logger.info("cocoro-agent ready ✓")
     yield
 
     # Shutdown
+    await task_scheduler.stop()
     if hasattr(pool, "close"):
         await pool.close()
     logger.info("cocoro-agent stopped")
@@ -144,6 +151,7 @@ app.include_router(webhook.router)
 app.include_router(stats.router)           # Phase 3: 統計
 app.include_router(personality.router)     # Phase 3: 人格設定
 app.include_router(roles.router)           # Phase 4: 専門職ロール
+app.include_router(schedules.router)       # Phase 5: タスクスケジューラー
 
 
 # ── Health Endpoints ──────────────────────────────────────────────────────

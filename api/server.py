@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from api.routes import tasks, agents, org, webhook, stats, personality, roles, schedules
 from core.task_runner import TaskRunner
 from core.agent_proxy import AgentProxy
-from core.webhook import WebhookSender
+from core.webhook import WebhookSender, WEBHOOK_INIT_SQL
 from core.scheduler import TaskScheduler
 
 # ── Logging ──────────────────────────────────────────────────────────────
@@ -33,6 +33,7 @@ COCORO_CORE_URL  = os.getenv("COCORO_CORE_URL", "http://localhost:8001")
 COCORO_API_KEY   = os.getenv("COCORO_API_KEY", "cocoro-dev-2026")
 WEBHOOK_SECRET   = os.getenv("WEBHOOK_SECRET", "cocoro-webhook-secret")
 AGENT_PORT       = int(os.getenv("AGENT_PORT", "8002"))
+CONSOLE_URL      = os.getenv("CONSOLE_URL", "")  # 起動時Webhook自動登録先
 
 # ── DB Init SQL ───────────────────────────────────────────────────────────
 _INIT_SQL = """
@@ -67,6 +68,8 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
 );
 """
 
+# webhook_registrations テーブルは WEBHOOK_INIT_SQL (core.webhook) で追加作成する
+
 
 # ── Lifespan ──────────────────────────────────────────────────────────────
 @asynccontextmanager
@@ -97,6 +100,13 @@ async def lifespan(app: FastAPI):
     )
     sender = WebhookSender(db=pool, webhook_secret=WEBHOOK_SECRET)
 
+    # Webhook登録テーブルを別途初期化
+    try:
+        await pool.execute(WEBHOOK_INIT_SQL)
+        logger.info("Webhook registration tables initialized")
+    except Exception as e:
+        logger.debug("Webhook tables init skipped (FakeDB): %s", e)
+
     # タスクスケジューラー起動
     task_scheduler = TaskScheduler(db=pool, task_runner=runner)
     await task_scheduler.start()
@@ -107,6 +117,12 @@ async def lifespan(app: FastAPI):
     app.state.agent_proxy    = proxy
     app.state.webhook_sender = sender
     app.state.scheduler      = task_scheduler
+
+    # cocoro-console へのWebhook自動登録
+    if CONSOLE_URL:
+        import asyncio
+        asyncio.create_task(sender.auto_register_console(CONSOLE_URL))
+        logger.info("Queued auto-registration to console: %s", CONSOLE_URL)
 
     logger.info("cocoro-agent ready ✓")
     yield

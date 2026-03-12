@@ -17,10 +17,10 @@ services:
     ports:
       - "${AGENT_PORT:-8002}:8002"
     environment:
-      # cocoro-coreとの接続（Docker内部通信またはIP直指定）
-      - COCORO_CORE_URL=${COCORO_CORE_URL:-http://cocoro-core:8001}
+      # cocoro-coreとの接続（Docker内部통信またはIP直指定）
+      - COCORO_CORE_URL=${COCORO_CORE_URL:-http://cocoro-core:8000}
       # 認証（cocoro-coreと同じキーを使用）
-      - COCORO_API_KEY=${COCORO_API_KEY:-cocoro-dev-2026}
+      - COCORO_API_KEY=${COCORO_API_KEY:-cocoro-2026}
       # このサービスのポート
       - AGENT_PORT=${AGENT_PORT:-8002}
       # Webhook署名
@@ -32,7 +32,7 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       # ── ロール設定（Phase 4: 専門職ノード） ──────────────────────────
       # このノードが担当するロール（カンマ区切り、未設定=全ロール）
-      - AGENT_ROLES=${AGENT_ROLES:-researcher,engineer,lawyer,accountant,financial_advisor}
+      - AGENT_ROLES=${AGENT_ROLES:-researcher,engineer,lawyer,accountant,financial_advisor,medical_advisor}
       # このノードの識別子（複数miniPC構成時に使用）
       - NODE_ID=${NODE_ID:-main-node}
       # このノードの表示名
@@ -56,7 +56,7 @@ services:
   cocoro-core-check:
     image: curlimages/curl:latest
     command: >
-      sh -c "until curl -sf ${COCORO_CORE_URL:-http://cocoro-core:8001}/health; do
+      sh -c "until curl -sf ${COCORO_CORE_URL:-http://cocoro-core:8000}/health; do
         echo 'Waiting for cocoro-core...'; sleep 3; done;
         echo 'cocoro-core is ready'"
     networks:

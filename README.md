@@ -1,6 +1,7 @@
 # cocoro-agent
 
-> cocoro-core の agent/ 層を外部 HTTP API として公開する、自律タスク実行サービス
+> cocoro-core の agent/ 層を外部 HTTP API として公開する、自律タスク実行サービス 
+> **Phase 4**: ロールベース専門職エージェント対応 — 複数 miniPC 分散実行設計
 
 [![Python](https://img.shields.io/badge/Python-3.11+-blue?logo=python)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-green?logo=fastapi)](https://fastapi.tiangolo.com)
@@ -35,25 +36,14 @@ pip install -r requirements.txt
 COCORO_API_KEY=cocoro-dev-2026 uvicorn api.server:app --port 8002 --reload
 ```
 
-### API確認
+### miniPC へのインストール（ワンコマンド）
 
 ```bash
-# ヘルスチェック
-curl http://localhost:8002/health
+# ダウンロードして実行（インタラクティブ設定付き）
+curl -sSL https://raw.githubusercontent.com/mdl-systems/cocoro-agent/main/setup.sh | bash
 
-# タスク投入
-curl -X POST http://localhost:8002/tasks \
-  -H "Authorization: Bearer cocoro-dev-2026" \
-  -H "Content-Type: application/json" \
-  -d '{"title": "AIトレンドをリサーチして", "type": "research"}'
-
-# 状態確認（task_id は投入レスポンスから）
-curl http://localhost:8002/tasks/{task_id} \
-  -H "Authorization: Bearer cocoro-dev-2026"
-
-# SSEストリーミング（リアルタイム進捗）
-curl -N http://localhost:8002/tasks/{task_id}/stream \
-  -H "Authorization: Bearer cocoro-dev-2026"
+# またはローカルで:
+bash setup.sh
 ```
 
 ### Docker（cocoro-core と同一ネットワーク）
@@ -62,17 +52,20 @@ curl -N http://localhost:8002/tasks/{task_id}/stream \
 # cocoro-core側で先にネットワーク作成
 cd ../cocoro-core && docker compose up -d
 
-# cocoro-agent起動
+# cocoro-agent起動（単体ノード）
 cd infra/docker
-cp .env .env.local  # 必要に応じて編集
+cp .env.example .env   # 必要に応じて編集
 docker compose up -d
+
+# 専門職ノード（例: 弁護士・税理士）
+AGENT_ROLES=lawyer,accountant NODE_ID=minipc-b docker compose up -d
 ```
 
 ## API エンドポイント
 
 | Method | Path | 説明 |
 |--------|------|------|
-| `POST` | `/tasks` | タスク投入 |
+| `POST` | `/tasks` | タスク投入（`role_id` でロール指定可） |
 | `GET` | `/tasks` | タスク一覧（status/limit/offsetフィルター） |
 | `GET` | `/tasks/{id}` | タスク状態確認（ポーリング用） |
 | `GET` | `/tasks/{id}/result` | タスク最終結果取得 |
@@ -83,10 +76,42 @@ docker compose up -d
 | `GET` | `/agents/{id}/personality` | エージェント人格設定取得 |
 | `PATCH` | `/agents/{id}/personality` | エージェント人格設定更新 |
 | `GET` | `/org/status` | 組織全体の状態サマリー |
+| `GET` | `/roles` | 専門職ロール一覧 |
+| `GET` | `/roles/{role_id}` | ロール詳細 |
 | `POST` | `/webhooks/test` | Webhook送信テスト |
 | `GET` | `/webhooks/deliveries` | Webhook配信履歴 |
 | `GET` | `/health` | ヘルスチェック |
 | `GET` | `/docs` | Swagger UI |
+
+### ロールベースでのタスク投入
+
+```bash
+# 利用可能なロール一覧を確認
+curl http://localhost:8002/roles \
+  -H "Authorization: Bearer cocoro-dev-2026"
+
+# 弁護士ロールでタスク投入
+curl -X POST http://localhost:8002/tasks \
+  -H "Authorization: Bearer cocoro-dev-2026" \
+  -H "Content-Type: application/json" \
+  -d '{"title": "NDA契約書をレビューして", "role_id": "lawyer"}'
+
+# 税理士ロールでタスク投入
+curl -X POST http://localhost:8002/tasks \
+  -H "Authorization: Bearer cocoro-dev-2026" \
+  -H "Content-Type: application/json" \
+  -d '{"title": "2026年の法人税申告の注意点を教えて", "role_id": "accountant"}'
+```
+
+### 利用可能なロール
+
+| role_id | 名前 | 専門領域 |
+|---------|------|----------|
+| `researcher` | リサーチエージェント | 市場調査・情報収集・レポート作成 |
+| `engineer` | エンジニアエージェント | コードレビュー・設計・デバッグ |
+| `lawyer` | 弁護士エージェント | 法律文書・契約書・法的リスク分析 |
+| `accountant` | 税理士エージェント | 税務申告・財務分析・節税対策 |
+| `financial_advisor` | ファイナンシャルアドバイザー | 資産運用・投資計画・FP相談 |
 
 ## cocoro-sdk との連携
 
@@ -130,6 +155,9 @@ console.log(result.result)
 |------|-----------|------|
 | `COCORO_API_KEY` | `cocoro-dev-2026` | Bearer認証キー |
 | `COCORO_CORE_URL` | `http://localhost:8001` | cocoro-core URL |
+| `AGENT_ROLES` | 全ロール | 担当ロール（カンマ区切り）|
+| `NODE_ID` | `main-node` | ノード識別子（複数miniPC時） |
+| `NODE_NAME` | `メインノード` | ノード表示名 |
 | `DATABASE_URL` | `postgresql://...` | PostgreSQL（未設定時はインメモリ） |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis（未設定時はSSE無効） |
 | `WEBHOOK_SECRET` | `cocoro-webhook-secret` | Webhook HMAC-SHA256 署名キー |
@@ -145,29 +173,65 @@ python -m pytest tests/ -v
 
 ## アーキテクチャ
 
+### 複数 miniPC 構成（Cocoro OS ノードネットワーク）
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  miniPC A — 192.168.50.92  (メインノード)                    │
+│  ├── cocoro-core   :8001  (LLM / DB / Redis)                │
+│  ├── cocoro-console:3000  (管理UI)                          │
+│  └── cocoro-agent  :8002  AGENT_ROLES=researcher,engineer   │
+└──────────────────────────┬──────────────────────────────────┘
+                           │ Docker network (cocoro-network)
+          ┌────────────────┴────────────────┐
+          │                                 │
+┌─────────┴──────────────┐   ┌─────────────┴──────────────┐
+│ miniPC B — 192.168.50.93│   │ miniPC C — 192.168.50.94   │
+│ └── cocoro-agent :8002 │   │ └── cocoro-agent :8002      │
+│   AGENT_ROLES=          │   │   AGENT_ROLES=             │
+│     lawyer,accountant   │   │     financial_advisor      │
+│   NODE_ID=minipc-b      │   │   NODE_ID=minipc-c         │
+│   NODE_NAME=            │   │   NODE_NAME=               │
+│     弁護士・税理士ノード  │   │     FPノード               │
+└─────────────────────────┘   └────────────────────────────┘
+```
+
+**ロール転送の仕組み（Phase 4）**
+
+1. クライアントが `POST /tasks {role_id: "lawyer"}` をメインノードに送信
+2. `core/roles.py` の `node_id` が設定済みの場合 → miniPC B に HTTP 転送
+3. `node_id = None` の場合 → このノード自身で実行
+4. 転送失敗時は自動フォールバック（ローカルシミュレーション）
+
+### ファイル構成
+
 ```
 cocoro-agent/
 ├── api/
 │   ├── server.py          # FastAPI app（port 8002）
 │   ├── middleware.py       # Bearer token 認証
 │   └── routes/
-│       ├── tasks.py        # POST/GET /tasks + SSE
+│       ├── tasks.py        # POST/GET /tasks + SSE（role_id対応）
 │       ├── agents.py       # GET /agents
 │       ├── org.py          # GET /org/status
 │       ├── stats.py        # GET /stats
 │       ├── personality.py  # GET/PATCH /agents/{id}/personality
+│       ├── roles.py        # GET /roles, GET /roles/{id}
 │       └── webhook.py      # POST/GET /webhooks
 ├── core/
-│   ├── task_runner.py      # cocoro-core ブリッジ（3モード）
+│   ├── task_runner.py      # cocoro-core ブリッジ（3モード + node転送）
+│   ├── roles.py            # 専門職ロール定義（5ロール + node_id設計）
 │   ├── agent_proxy.py      # エージェント情報取得
 │   ├── webhook.py          # HMAC付きWebhook送信
 │   └── sse.py              # Redis Pub/Sub → SSE
 ├── models/
-│   ├── task.py             # Pydanticモデル（Task系）
+│   ├── task.py             # Pydanticモデル（role_id/role_name追加）
 │   └── agent.py            # Pydanticモデル（Agent系）
-└── infra/docker/
-    ├── Dockerfile
-    └── docker-compose.yml  # cocoro-network に参加
+├── infra/docker/
+│   ├── Dockerfile
+│   ├── docker-compose.yml  # cocoro-network参加 + AGENT_ROLES対応
+│   └── .env.example        # 環境変数テンプレート
+└── setup.sh                # miniPC インストールスクリプト
 ```
 
 ## 関連リポジトリ

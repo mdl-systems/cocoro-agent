@@ -78,6 +78,7 @@ async def create_task(
         agent_type=agent_type,
         priority=priority,
         webhook_url=body.webhook_url,
+        role_id=body.role_id,
     )
 
     task = await runner.get_task(task_id)

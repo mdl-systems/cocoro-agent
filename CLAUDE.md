@@ -24,20 +24,22 @@ cocoro-agent/
 ├── api/
 │   ├── server.py             # FastAPI メインサーバー（FakeDB内蔵）
 │   ├── routes/
-│   │   ├── tasks.py          # タスク CRUD・実行・SSEストリーミング
+│   │   ├── tasks.py          # タスク CRUD・実行・SSEストリーミング（role_id対応）
 │   │   ├── agents.py         # エージェント一覧・状態
 │   │   ├── org.py            # 組織状態
-│   │   ├── stats.py          # タスク統計 GET /stats      ← Phase 3
-│   │   ├── personality.py    # 人格設定 GET/PATCH /agents/{id}/personality ← Phase 3
+│   │   ├── stats.py          # タスク統計 GET /stats
+│   │   ├── personality.py    # 人格設定 GET/PATCH /agents/{id}/personality
+│   │   ├── roles.py          # 専門職ロール GET /roles, GET /roles/{id}  ← Phase 4
 │   │   └── webhook.py        # Webhook設定・配信
 │   └── middleware.py         # Bearer token 認証
 ├── core/
-│   ├── task_runner.py        # cocoro-coreブリッジ（直接import/HTTPプロキシ/シミュレーション）
+│   ├── task_runner.py        # cocoro-coreブリッジ（ロール適用・node転送・シミュレーション）
+│   ├── roles.py              # 専門職ロール定義（5ロール + node_id転送設計）← Phase 4
 │   ├── agent_proxy.py        # エージェント情報取得（DB→静的フォールバック）
 │   ├── webhook.py            # HMAC-SHA256署名付きWebhook送信
 │   └── sse.py                # Redis Pub/Sub → SSEストリーミング
 ├── models/
-│   ├── task.py               # タスクモデル
+│   ├── task.py               # タスクモデル（role_id / role_name フィールド追加）
 │   └── agent.py              # エージェントモデル
 ├── infra/docker/
 │   ├── Dockerfile
@@ -72,7 +74,7 @@ open http://localhost:8002/docs
 
 | Method | Path | 説明 |
 |--------|------|------|
-| `POST` | `/tasks` | タスク投入 |
+| `POST` | `/tasks` | タスク投入（`role_id` フィールドでロール指定可） |
 | `GET` | `/tasks` | タスク一覧 |
 | `GET` | `/tasks/{id}` | 状態確認（ポーリング用） |
 | `GET` | `/tasks/{id}/result` | 最終結果取得 |
@@ -83,6 +85,8 @@ open http://localhost:8002/docs
 | `GET` | `/agents/{id}/personality` | 人格設定取得 |
 | `PATCH` | `/agents/{id}/personality` | 人格設定更新 |
 | `GET` | `/org/status` | 組織全体の状態 |
+| `GET` | `/roles` | 専門職ロール一覧（5ロール）← Phase 4 |
+| `GET` | `/roles/{role_id}` | ロール詳細 ← Phase 4 |
 | `POST` | `/webhooks/test` | Webhookテスト送信 |
 | `GET` | `/webhooks/deliveries` | 配信履歴 |
 | `GET` | `/health` | ヘルスチェック |
@@ -91,6 +95,16 @@ open http://localhost:8002/docs
 ## タスク投入テスト
 
 ```bash
+# ロール一覧を取得
+curl http://localhost:8002/roles \
+  -H "Authorization: Bearer cocoro-dev-2026"
+
+# ロール指定でタスク投入（弁護士エージェント）
+curl -X POST http://localhost:8002/tasks \
+  -H "Authorization: Bearer cocoro-dev-2026" \
+  -H "Content-Type: application/json" \
+  -d '{"title": "契約書をレビューして", "role_id": "lawyer"}'
+
 # タスク投入
 curl -X POST http://localhost:8002/tasks \
   -H "Authorization: Bearer cocoro-dev-2026" \
@@ -143,3 +157,8 @@ curl http://localhost:8002/agents/researcher/personality \
 |------|---------| 
 | 2026-03-09 | 初版実装（Phase 1-3）: 27ファイル・18テスト・全エンドポイント実装 |
 | 2026-03-09 | README.md追加、cocoro-console/website統合完了 |
+| 2026-03-12 | Phase 4: ロールベース専門職エージェント実装 |
+|            | - `core/roles.py`: 5ロール定義（lawyer/accountant/engineer/researcher/financial_advisor） |
+|            | - `POST /tasks`: `role_id` フィールドでロール指定・system_prompt自動適用 |
+|            | - `GET /roles`: ロール一覧・詳細API追加 |
+|            | - `_forward_to_node()`: 将来の複数miniPC転送設計実装 |

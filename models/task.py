@@ -38,6 +38,7 @@ class TaskCreateRequest(BaseModel):
     type: TaskType = Field(TaskType.AUTO, description="タスクタイプ")
     assignTo: Optional[str] = Field(None, description="割り当て先エージェント名 (auto=自動)")
     priority: TaskPriority = Field(TaskPriority.NORMAL, description="優先度")
+    role_id: Optional[str] = Field(None, description="専門職ロール ID (lawyer/accountant/engineer/researcher/financial_advisor)")
     webhook_url: Optional[str] = Field(None, description="完了時Webhook通知先URL")
 
     class Config:
@@ -48,6 +49,7 @@ class TaskCreateRequest(BaseModel):
                 "type": "research",
                 "assignTo": "auto",
                 "priority": "normal",
+                "role_id": "researcher",
                 "webhook_url": "https://example.com/webhook"
             }
         }
@@ -65,6 +67,8 @@ class TaskResponse(BaseModel):
     status: TaskStatus
     title: str
     assignedTo: Optional[str] = None
+    role_id: Optional[str] = None        # 使用した専門職ロール
+    role_name: Optional[str] = None      # ロールの表示名
     estimatedSeconds: Optional[int] = None
     createdAt: datetime
     updatedAt: Optional[datetime] = None

@@ -12,7 +12,7 @@ import asyncpg
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routes import tasks, agents, org, webhook, stats, personality
+from api.routes import tasks, agents, org, webhook, stats, personality, roles
 from core.task_runner import TaskRunner
 from core.agent_proxy import AgentProxy
 from core.webhook import WebhookSender
@@ -143,6 +143,7 @@ app.include_router(org.router)
 app.include_router(webhook.router)
 app.include_router(stats.router)           # Phase 3: 統計
 app.include_router(personality.router)     # Phase 3: 人格設定
+app.include_router(roles.router)           # Phase 4: 専門職ロール
 
 
 # ── Health Endpoints ──────────────────────────────────────────────────────

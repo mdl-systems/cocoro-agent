@@ -18,6 +18,7 @@ from core.task_runner import TaskRunner
 from core.agent_proxy import AgentProxy
 from core.webhook import WebhookSender, WEBHOOK_INIT_SQL
 from core.scheduler import TaskScheduler
+from core.monitoring import RequestTimingMiddleware, metrics_buffer, check_slow_tasks
 
 # ── Logging ──────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -125,10 +126,27 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(sender.auto_register_console(CONSOLE_URL))
         logger.info("Queued auto-registration to console: %s", CONSOLE_URL)
 
+    # スロータスク自動監視 (5分ごと)
+    import asyncio
+    async def _slow_task_watchdog():
+        while True:
+            try:
+                await asyncio.sleep(300)  # 5分ごと
+                count = await check_slow_tasks(pool, sender)
+                if count:
+                    logger.warning("Slow task watchdog: %d task(s) alerted", count)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.debug("Slow task watchdog error: %s", exc)
+    watchdog_task = asyncio.create_task(_slow_task_watchdog())
+    app.state.watchdog_task = watchdog_task
+
     logger.info("cocoro-agent ready ✓")
     yield
 
     # Shutdown
+    watchdog_task.cancel()
     await task_scheduler.stop()
     if hasattr(pool, "close"):
         await pool.close()
@@ -159,6 +177,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# リクエストレイテンシ計測ミドルウェア
+app.add_middleware(RequestTimingMiddleware)
 
 # Routes
 app.include_router(tasks.router)
@@ -225,6 +245,7 @@ async def health(request: Request):
         "gemini_enabled": bool(os.getenv("GEMINI_API_KEY", "")),
         "tasks_active": tasks_active,
         "tasks_completed_today": tasks_completed_today,
+        "performance": metrics_buffer.summary(),
         "timestamp": now.isoformat(),
     }
 

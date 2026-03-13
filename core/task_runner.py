@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Optional, AsyncIterator
 
 from core.roles import get_role, get_system_prompt, get_node_id
+from core.gemini_executor import GeminiExecutor, GEMINI_API_KEY
 
 logger = logging.getLogger("cocoro.agent.runner")
 
@@ -67,6 +68,13 @@ class TaskRunner:
             logger.info("TaskRunner: direct mode (cocoro-core imported)")
         else:
             logger.info("TaskRunner: HTTP proxy mode → %s", cocoro_core_url)
+
+        # Gemini 実行エンジン
+        self._gemini = GeminiExecutor()
+        if self._gemini.available:
+            logger.info("GeminiExecutor: ready (model=%s)", self._gemini.model)
+        else:
+            logger.info("GeminiExecutor: disabled (GEMINI_API_KEY not set) — using simulation")
 
     # ── ルーティング ─────────────────────────────────────────────────────
 
@@ -177,9 +185,9 @@ class TaskRunner:
                 logger.info("Task %s submitted via HTTP", task_id[:8])
             except httpx.HTTPError as e:
                 logger.error("HTTP submit failed: %s", e)
-                # フォールバック: ローカルで実行をシミュレート
-                await self._simulate_execution(task_id, title, description, agent_type,
-                                              system_prompt=system_prompt, role_id=role_id)
+                # フォールバック: Gemini実行 → シミュレーション
+                await self._run_task_locally(task_id, title, description, agent_type,
+                                             system_prompt=system_prompt, role_id=role_id)
 
     # ── リモートノード転送（将来の複数miniPC対応） ──────────────────────────
 
@@ -214,9 +222,8 @@ class TaskRunner:
                 return resp.json()
             except httpx.HTTPError as e:
                 logger.error("Node forward failed (%s): %s — falling back to local", node_id, e)
-                # 転送失敗時は自ノードで実行
-                await self._simulate_execution(task_id, title, description, agent_type,
-                                              system_prompt=system_prompt, role_id=role_id)
+                await self._run_task_locally(task_id, title, description, agent_type,
+                                             system_prompt=system_prompt, role_id=role_id)
                 return {"task_id": task_id, "status": "queued", "role_id": role_id,
                         "note": f"Forwarding to {node_id} failed; running locally"}
 
@@ -298,7 +305,55 @@ class TaskRunner:
             await pubsub.unsubscribe(channel)
             await redis_client.aclose()
 
-    # ── シミュレーション（cocoro-core未接続時のデモ用） ───────────────────
+    # ── ローカル実行 (Gemini → シミュレーション フォールバック) ──────────────────
+
+    async def _run_task_locally(self, task_id: str, title: str,
+                                description: str, agent_type: str,
+                                system_prompt: Optional[str] = None,
+                                role_id: Optional[str] = None):
+        """
+        GEMINI_API_KEYが設定されている場合は Gemini APIで実行。
+        未設定の場合はシミュレーションにフォールバック。
+        """
+        if self._gemini.available:
+            # Redis接続を試みる
+            redis_client = None
+            try:
+                import redis.asyncio as aioredis
+                redis_client = aioredis.from_url(self.redis_url, decode_responses=True)
+                await redis_client.ping()
+            except Exception:
+                redis_client = None
+
+            async def _run_gemini():
+                try:
+                    await self._gemini.execute(
+                        task_id=task_id,
+                        title=title,
+                        instruction=description or title,
+                        system_prompt=system_prompt,
+                        role_id=role_id,
+                        db=self.db,
+                        redis_client=redis_client,
+                    )
+                except Exception as e:
+                    logger.error("Gemini execution failed for task %s: %s — falling back to simulation",
+                                 task_id[:8], e)
+                    await self._simulate_execution(task_id, title, description, agent_type,
+                                                  system_prompt=system_prompt, role_id=role_id)
+                finally:
+                    if redis_client:
+                        try:
+                            await redis_client.aclose()
+                        except Exception:
+                            pass
+
+            asyncio.create_task(_run_gemini())
+        else:
+            await self._simulate_execution(task_id, title, description, agent_type,
+                                           system_prompt=system_prompt, role_id=role_id)
+
+    # ── シミュレーション（cocoro-core未接続・〄2インターネット環境のデモ用） ───────────────
 
     async def _simulate_execution(self, task_id: str, title: str,
                                    description: str, agent_type: str,

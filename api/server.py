@@ -9,10 +9,11 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 import asyncpg
-from fastapi import FastAPI
+import httpx
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routes import tasks, agents, org, webhook, stats, personality, roles, schedules
+from api.routes import tasks, agents, org, webhook, stats, personality, roles, schedules, setup
 from core.task_runner import TaskRunner
 from core.agent_proxy import AgentProxy
 from core.webhook import WebhookSender, WEBHOOK_INIT_SQL
@@ -145,7 +146,7 @@ app = FastAPI(
         "- `GET /agents` — エージェント一覧\n"
         "- `GET /org/status` — 組織状態\n"
     ),
-    version="0.1.0",
+    version="1.0.0",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
@@ -168,20 +169,62 @@ app.include_router(stats.router)           # Phase 3: 統計
 app.include_router(personality.router)     # Phase 3: 人格設定
 app.include_router(roles.router)           # Phase 4: 専門職ロール
 app.include_router(schedules.router)       # Phase 5: タスクスケジューラー
+app.include_router(setup.router)           # Phase 6: インストーラー連携
 
 
 # ── Health Endpoints ──────────────────────────────────────────────────────
 
 @app.get("/health", tags=["System"])
-async def health():
-    """ヘルスチェック"""
+async def health(request: Request):
+    """詳細なヘルスステータスを返す（cocoro-installer対応）"""
+    from core.roles import ROLES
+    db = request.app.state.db
+    now = datetime.now(timezone.utc)
+
+    # 今日完了タスク数
+    tasks_active = 0
+    tasks_completed_today = 0
+    try:
+        row = await db.fetchrow(
+            "SELECT COUNT(*) FROM agent_tasks WHERE status IN ('queued','running')"
+        )
+        tasks_active = int(row["count"]) if row else 0
+
+        row2 = await db.fetchrow(
+            "SELECT COUNT(*) FROM agent_tasks "
+            "WHERE status IN ('completed','complete','failed') "
+            "AND completed_at >= NOW() - INTERVAL '1 day'"
+        )
+        tasks_completed_today = int(row2["count"]) if row2 else 0
+    except Exception:
+        pass
+
+    # cocoro-coreへの按通確認
+    core_connected = False
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            resp = await client.get(f"{COCORO_CORE_URL}/health")
+            core_connected = resp.status_code < 300
+    except Exception:
+        pass
+
+    # アクティブロール
+    active_roles = os.getenv("AGENT_ROLES", ",".join(ROLES.keys())).split(",")
+    active_roles = [r.strip() for r in active_roles if r.strip()]
+
     return {
-        "status": "ok",
+        "status": "healthy",
         "service": "cocoro-agent",
-        "version": "0.1.0",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "version": "1.0.0",
+        "node_id": os.getenv("NODE_ID", os.getenv("HOSTNAME", "local")),
         "port": AGENT_PORT,
-        "cocoro_core": COCORO_CORE_URL,
+        "roles": active_roles,
+        "cocoro_core_connected": core_connected,
+        "cocoro_core_url": COCORO_CORE_URL,
+        "gemini_enabled": bool(os.getenv("GEMINI_API_KEY", "")),
+        "tasks_active": tasks_active,
+        "tasks_completed_today": tasks_completed_today,
+        "timestamp": now.isoformat(),
     }
 
 
@@ -189,9 +232,10 @@ async def health():
 async def root():
     return {
         "service": "cocoro-agent",
-        "version": "0.1.0",
+        "version": "1.0.0",
         "docs": "/docs",
         "health": "/health",
+        "setup": "/setup/init",
     }
 
 

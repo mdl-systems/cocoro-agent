@@ -352,3 +352,265 @@ async def stream_task(
             yield event
 
     return EventSourceResponse(event_generator())
+
+
+# ── ファイル付きタスク投入 ─────────────────────────────────────────────────────
+
+@router.post(
+    "/with-file",
+    summary="ファイルを添付してタスクを投入",
+    description=(
+        "multipart/form-data でファイルを受け取り、テキスト抽出して LLM で処理します。\n\n"
+        "**対応形式**: PDF / TXT / MD / CSV  \n"
+        "**最大サイズ**: 20MB\n\n"
+        "処理状況は `GET /tasks/{id}/stream` でSSE配信されます。"
+    ),
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def submit_task_with_file(
+    request: Request,
+    _: str = Depends(verify_api_key),
+):
+    """ファイルをアップロードしてテキスト抽出 → Gemini 処理"""
+    from fastapi import File, Form, UploadFile
+    from core.file_processor import (
+        detect_type, extract_text, split_into_chunks,
+        build_file_prompt, validate_file_size, SUPPORTED_TYPES
+    )
+    import asyncio
+
+    # ── multipart フォームパース ──────────────────────────────────────────────
+    form = await request.form()
+
+    uploaded_file = form.get("file")
+    instruction   = form.get("instruction", "")
+    role_id       = form.get("role_id", "researcher")
+
+    if not uploaded_file or not hasattr(uploaded_file, "filename"):
+        raise HTTPException(400, "Missing 'file' field in multipart form")
+
+    filename     = uploaded_file.filename or "upload"
+    content_type = uploaded_file.content_type or ""
+    file_data    = await uploaded_file.read()
+
+    # ── バリデーション ────────────────────────────────────────────────────────
+    try:
+        validate_file_size(file_data)
+    except ValueError as e:
+        raise HTTPException(413, str(e))
+
+    file_type = detect_type(filename, content_type)
+    if file_type is None:
+        supported = ", ".join(
+            [".pdf", ".txt", ".md", ".csv", ".tsv"]
+        )
+        raise HTTPException(
+            415,
+            f"Unsupported file type: '{filename}'. Supported: {supported}"
+        )
+
+    if not instruction:
+        # デフォルト指示
+        instruction = f"このファイル（{filename}）の内容を分析して、重要なポイントをまとめてください。"
+
+    # ── タスク登録 ────────────────────────────────────────────────────────────
+    task_id   = str(uuid.uuid4())
+    title     = f"[ファイル処理] {filename}"
+    runner    = request.app.state.task_runner
+    db        = request.app.state.db
+
+    await db.execute(
+        """
+        INSERT INTO agent_tasks
+          (id, title, description, agent_type, priority, status, webhook_url)
+        VALUES ($1::uuid, $2, $3, $4, 5, 'queued', NULL)
+        ON CONFLICT (id) DO NOTHING
+        """,
+        task_id, title[:200], instruction, role_id,
+    )
+
+    # ── バックグラウンドで処理実行 ────────────────────────────────────────────
+    asyncio.create_task(
+        _process_file_task(
+            runner=runner,
+            db=db,
+            task_id=task_id,
+            filename=filename,
+            content_type=content_type,
+            file_data=file_data,
+            instruction=instruction,
+            role_id=role_id,
+        )
+    )
+
+    logger.info(
+        "File task %s accepted: file=%s type=%s role=%s size=%dB",
+        task_id[:8], filename, file_type, role_id, len(file_data),
+    )
+
+    return {
+        "task_id": task_id,
+        "status": "queued",
+        "file": filename,
+        "file_type": file_type,
+        "role_id": role_id,
+        "stream_url": f"/tasks/{task_id}/stream",
+        "message": f"File '{filename}' accepted. Processing with role '{role_id}'.",
+    }
+
+
+async def _process_file_task(
+    runner,
+    db,
+    task_id: str,
+    filename: str,
+    content_type: str,
+    file_data: bytes,
+    instruction: str,
+    role_id: str,
+):
+    """ファイル処理パイプライン（バックグラウンド実行）"""
+    import json
+    from datetime import datetime, timezone
+    from core.file_processor import extract_text, split_into_chunks, build_file_prompt
+    from core.roles import get_role
+
+    role = get_role(role_id)
+    system_prompt = role["system_prompt"] if role else None
+
+    try:
+        # ── Step 1: running に更新 ────────────────────────────────────────
+        await db.execute(
+            "UPDATE agent_tasks SET status='running', progress=5, current_step=$1, updated_at=$2 WHERE id=$3::uuid",
+            "ファイルを読み込み中...", datetime.now(timezone.utc), task_id,
+        )
+
+        # ── Step 2: テキスト抽出 ──────────────────────────────────────────
+        try:
+            extracted = extract_text(file_data, filename, content_type)
+        except (ImportError, ValueError) as e:
+            logger.error("File extraction error for task %s: %s", task_id[:8], e)
+            await db.execute(
+                "UPDATE agent_tasks SET status='failed', error=$1, updated_at=$2 WHERE id=$3::uuid",
+                str(e), datetime.now(timezone.utc), task_id,
+            )
+            return
+
+        await db.execute(
+            "UPDATE agent_tasks SET progress=20, current_step=$1, updated_at=$2 WHERE id=$3::uuid",
+            f"テキスト抽出完了 ({len(extracted):,} 文字)", datetime.now(timezone.utc), task_id,
+        )
+
+        # ── Step 3: チャンク分割 ──────────────────────────────────────────
+        chunks = split_into_chunks(extracted)
+        total_chunks = len(chunks)
+        logger.info("Task %s: %d chunk(s) from %s", task_id[:8], total_chunks, filename)
+
+        # ── Step 4: 各チャンクを Gemini で処理 ───────────────────────────
+        results = []
+        gemini = runner._gemini
+
+        for i, chunk in enumerate(chunks):
+            progress = 25 + int((i / total_chunks) * 60)
+            await db.execute(
+                "UPDATE agent_tasks SET progress=$1, current_step=$2, updated_at=$3 WHERE id=$4::uuid",
+                progress,
+                f"チャンク {i+1}/{total_chunks} を処理中...",
+                datetime.now(timezone.utc),
+                task_id,
+            )
+
+            prompt = build_file_prompt(
+                extracted_text=chunk,
+                instruction=instruction,
+                filename=filename,
+                chunk_index=i,
+                total_chunks=total_chunks,
+            )
+
+            if gemini.available:
+                try:
+                    # Redis 接続を試みる
+                    redis_client = None
+                    try:
+                        import redis.asyncio as aioredis
+                        redis_client = aioredis.from_url(runner.redis_url, decode_responses=True)
+                        await redis_client.ping()
+                    except Exception:
+                        redis_client = None
+
+                    result_text = await gemini._call_gemini_streaming(
+                        system_prompt=gemini._build_system_prompt(system_prompt, role_id),
+                        user_message=prompt,
+                        task_id=task_id,
+                        db=db,
+                        redis_client=redis_client,
+                        channel=f"cocoro:agent:progress:{task_id}",
+                    )
+                    if redis_client:
+                        await redis_client.aclose()
+                    results.append(result_text)
+                except Exception as e:
+                    logger.error("Gemini error for chunk %d of task %s: %s", i, task_id[:8], e)
+                    results.append(f"[チャンク {i+1} の処理中にエラーが発生しました: {e}]")
+            else:
+                # シミュレーション
+                results.append(
+                    f"[シミュレーション] チャンク {i+1}/{total_chunks} の処理結果:\n"
+                    f"ファイル '{filename}' の内容を {role_id} ロールで分析しました。\n"
+                    f"文字数: {len(chunk):,} 文字"
+                )
+
+        # ── Step 5: 結果を統合して保存 ───────────────────────────────────
+        await db.execute(
+            "UPDATE agent_tasks SET progress=95, current_step=$1, updated_at=$2 WHERE id=$3::uuid",
+            "結果を統合中...", datetime.now(timezone.utc), task_id,
+        )
+
+        full_result = "\n\n---\n\n".join(results) if len(results) > 1 else results[0]
+        result_obj = {
+            "summary": full_result[:300] + ("..." if len(full_result) > 300 else ""),
+            "full_response": full_result,
+            "file": filename,
+            "chunks": total_chunks,
+            "extracted_chars": len(extracted),
+            "role_id": role_id,
+        }
+
+        await db.execute(
+            """UPDATE agent_tasks
+               SET status='completed', result=$1, progress=100,
+                   current_step='完了', completed_at=$2, updated_at=$2
+               WHERE id=$3::uuid""",
+            json.dumps(result_obj, ensure_ascii=False),
+            datetime.now(timezone.utc),
+            task_id,
+        )
+
+        # Redis に完了イベントを Publish
+        try:
+            import redis.asyncio as aioredis
+            rc = aioredis.from_url(runner.redis_url, decode_responses=True)
+            await rc.publish(
+                f"cocoro:agent:progress:{task_id}",
+                json.dumps({"event": "completed", "data": {"result": result_obj}}),
+            )
+            await rc.aclose()
+        except Exception:
+            pass
+
+        logger.info(
+            "File task %s completed: file=%s chunks=%d",
+            task_id[:8], filename, total_chunks,
+        )
+
+    except Exception as e:
+        logger.exception("Unexpected error in file task %s: %s", task_id[:8], e)
+        try:
+            from datetime import datetime, timezone
+            await db.execute(
+                "UPDATE agent_tasks SET status='failed', error=$1, updated_at=$2 WHERE id=$3::uuid",
+                str(e), datetime.now(timezone.utc), task_id,
+            )
+        except Exception:
+            pass

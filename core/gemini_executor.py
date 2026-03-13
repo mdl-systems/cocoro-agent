@@ -98,6 +98,7 @@ class GeminiExecutor:
         instruction: str,
         system_prompt: Optional[str] = None,
         role_id: Optional[str] = None,
+        output_format: Optional[str] = None,
         db: Any = None,
         redis_client: Any = None,
     ) -> dict:
@@ -119,7 +120,7 @@ class GeminiExecutor:
         await self._update_status(db, redis_client, task_id, channel,
                                   "running", 15, "タスクを分析中...")
 
-        full_system = self._build_system_prompt(system_prompt, role_id)
+        full_system = self._build_system_prompt(system_prompt, role_id, output_format)
         user_message = self._build_user_message(title, instruction)
 
         # ── Step 3: Gemini API 呼び出し (ストリーミング) ──────────────────
@@ -144,9 +145,16 @@ class GeminiExecutor:
                                   "running", 95, "結果を保存中...")
 
         duration = time.time() - start_time
+
+        # フォーマット別パース
+        from core.output_formatter import parse_result as _parse_result
+        parsed_result = _parse_result(result_text, output_format)
+
         result = {
             "summary": result_text[:300] + ("..." if len(result_text) > 300 else ""),
             "full_response": result_text,
+            "parsed": parsed_result,
+            "output_format": output_format or "markdown",
             "role_id": role_id,
             "model": self.model,
             "duration_seconds": round(duration, 2),
@@ -259,8 +267,14 @@ class GeminiExecutor:
 
     # ── プロンプト構築 ────────────────────────────────────────────────────────
 
-    def _build_system_prompt(self, base_prompt: Optional[str], role_id: Optional[str]) -> str:
-        """ロールのsystem_promptにタスクヒントを追記"""
+    def _build_system_prompt(
+        self,
+        base_prompt: Optional[str],
+        role_id: Optional[str],
+        output_format: Optional[str] = None,
+    ) -> str:
+        """ロールのsystem_promptにタスクヒントとフォーマット指示を追記"""
+        from core.output_formatter import get_format_instruction
         parts = []
         if base_prompt:
             parts.append(base_prompt)
@@ -279,6 +293,11 @@ class GeminiExecutor:
             "- 根拠を明示する\n"
             "- 不確実な情報には必ずその旨を記載する"
         )
+
+        # アウトプット形式指示を末尾に追加
+        if output_format and output_format != "markdown":
+            parts.append(get_format_instruction(output_format))
+
         return "\n".join(parts)
 
     def _build_user_message(self, title: str, instruction: str) -> str:

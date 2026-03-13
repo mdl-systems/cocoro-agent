@@ -353,6 +353,114 @@ async def stream_task(
 
     return EventSourceResponse(event_generator())
 
+# ── タスクエクスポート ────────────────────────────────────────────────────────
+
+@router.get(
+    "/{task_id}/export",
+    summary="タスク結果をファイルにエクスポート",
+    description=(
+        "完了したタスクの結果を指定フォーマットでダウンロードします。\n\n"
+        "- `?format=pdf` → PDF ファイル (reportlab)\n"
+        "- `?format=md`  → Markdown ファイル\n"
+        "- `?format=json` → JSON ファイル"
+    ),
+)
+async def export_task(
+    task_id: str,
+    request: Request,
+    format: str = Query("md", description="出力形式: pdf / md / json"),
+    _: str = Depends(verify_api_key),
+):
+    """タスク結果を指定フォーマットでダウンロード"""
+    import json as _json
+    from fastapi.responses import Response
+    from core.output_formatter import generate_pdf, parse_result
+
+    runner = request.app.state.task_runner
+    task = await runner.get_task(task_id)
+    if not task:
+        raise HTTPException(404, f"Task {task_id} not found")
+
+    task_status = task.get("status", "")
+    if task_status not in ("completed", "complete"):
+        raise HTTPException(
+            409,
+            f"Task is not completed yet (status: {task_status}). "
+            "Cannot export in-progress tasks."
+        )
+
+    # 結果テキストを抽出
+    result_raw = task.get("result")
+    if isinstance(result_raw, str):
+        try:
+            result_obj = _json.loads(result_raw)
+        except Exception:
+            result_obj = {"full_response": result_raw}
+    elif isinstance(result_raw, dict):
+        result_obj = result_raw
+    else:
+        result_obj = {"full_response": str(result_raw or "")}
+
+    title     = task.get("title", "タスク結果")
+    full_text = (
+        result_obj.get("full_response")
+        or result_obj.get("text")
+        or _json.dumps(result_obj, ensure_ascii=False, indent=2)
+    )
+    safe_title = title.replace("/", "_").replace("\\", "_")[:80]
+
+    fmt = format.lower().lstrip(".")
+
+    # ── PDF ────────────────────────────────────────────────────────────────
+    if fmt == "pdf":
+        try:
+            pdf_bytes = generate_pdf(
+                title=title,
+                content=full_text,
+                metadata={
+                    "タスクID": task_id,
+                    "ロール": task.get("agent_type", "-"),
+                    "作成日時": str(task.get("completed_at", "") or ""),
+                },
+            )
+            return Response(
+                content=pdf_bytes,
+                media_type="application/pdf",
+                headers={
+                    "Content-Disposition": f'attachment; filename="{safe_title}.pdf"'
+                },
+            )
+        except ImportError as e:
+            raise HTTPException(501, str(e))
+
+    # ── Markdown ────────────────────────────────────────────────────────────
+    elif fmt in ("md", "markdown"):
+        md_content = f"# {title}\n\n{full_text}"
+        return Response(
+            content=md_content.encode("utf-8"),
+            media_type="text/markdown; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="{safe_title}.md"'
+            },
+        )
+
+    # ── JSON ────────────────────────────────────────────────────────────────
+    elif fmt == "json":
+        json_content = _json.dumps(
+            {"task_id": task_id, "title": title, "result": result_obj},
+            ensure_ascii=False,
+            indent=2,
+        )
+        return Response(
+            content=json_content.encode("utf-8"),
+            media_type="application/json",
+            headers={
+                "Content-Disposition": f'attachment; filename="{safe_title}.json"'
+            },
+        )
+    else:
+        raise HTTPException(400, f"Unsupported format: '{fmt}'. Use: pdf, md, json")
+
 
 # ── ファイル付きタスク投入 ─────────────────────────────────────────────────────
 

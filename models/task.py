@@ -58,6 +58,13 @@ class TaskPriority(str, Enum):
     HIGH   = "high"
 
 
+class OutputFormat(str, Enum):
+    """タスク結果のアウトプット形式"""
+    MARKDOWN = "markdown"   # マークダウンテキスト
+    JSON     = "json"       # 構造化データ (summary/points/conclusion)
+    SLIDES   = "slides"     # スライド構成
+    EMAIL    = "email"      # メール文面 (subject + body)
+
 # === Request / Response schemas ===
 
 class TaskCreateRequest(BaseModel):
@@ -68,17 +75,20 @@ class TaskCreateRequest(BaseModel):
     priority: TaskPriority = Field(TaskPriority.NORMAL, description="優先度")
     role_id: Optional[str] = Field(None, description="専門職ロール ID (lawyer/accountant/engineer/researcher/financial_advisor)")
     webhook_url: Optional[str] = Field(None, description="完了時Webhook通知先URL")
+    output_format: Optional[OutputFormat] = Field(
+        None,
+        description="アウトプット形式: markdown / json / slides / email"
+    )
 
     class Config:
         json_schema_extra = {
             "example": {
-                "title": "AIトレンドをリサーチして",
-                "description": "2026年のAIトレンドを調査し、3つのポイントにまとめて",
+                "title": "Q4レポートを分析して",
+                "description": "2026年Q4の消費トレンドを分析したスライドを作成して",
                 "type": "research",
-                "assignTo": "auto",
                 "priority": "normal",
                 "role_id": "researcher",
-                "webhook_url": "https://example.com/webhook"
+                "output_format": "slides",
             }
         }
 

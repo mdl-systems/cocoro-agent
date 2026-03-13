@@ -13,7 +13,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routes import tasks, agents, org, webhook, stats, personality, roles, schedules, setup
+from api.routes import tasks, agents, org, webhook, stats, personality, roles, schedules, setup, relay
 from core.task_runner import TaskRunner
 from core.agent_proxy import AgentProxy
 from core.webhook import WebhookSender, WEBHOOK_INIT_SQL
@@ -170,6 +170,7 @@ app.include_router(personality.router)     # Phase 3: 人格設定
 app.include_router(roles.router)           # Phase 4: 専門職ロール
 app.include_router(schedules.router)       # Phase 5: タスクスケジューラー
 app.include_router(setup.router)           # Phase 6: インストーラー連携
+app.include_router(relay.router)           # Phase 7: ノード間リレー通信
 
 
 # ── Health Endpoints ──────────────────────────────────────────────────────

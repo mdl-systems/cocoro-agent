@@ -1,12 +1,13 @@
 # cocoro-agent
 
 > cocoro-core の agent/ 層を外部 HTTP API として公開する、自律タスク実行サービス 
-> **Phase 4**: ロールベース専門職エージェント対応 — 複数 miniPC 分散実行設計
+> **v1.0.0**: 6種専門職ロール・SSE進捗・ファイル処理・スケジューラー・Webhook・ノード間通信
 
+[![Version](https://img.shields.io/badge/version-1.0.0-blue)](CHANGELOG.md)
 [![Python](https://img.shields.io/badge/Python-3.11+-blue?logo=python)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-green?logo=fastapi)](https://fastapi.tiangolo.com)
 [![Port](https://img.shields.io/badge/Port-8002-purple)](http://localhost:8002)
-[![Tests](https://img.shields.io/badge/Tests-18%20passed-brightgreen)](#テスト)
+[![Tests](https://img.shields.io/badge/tests-18%20passed-brightgreen)](#テスト)
 
 ## 概要
 
@@ -103,7 +104,7 @@ curl -X POST http://localhost:8002/tasks \
   -d '{"title": "2026年の法人税申告の注意点を教えて", "role_id": "accountant"}'
 ```
 
-### 利用可能なロール
+### 利用可能なロール（v1.0.0: 6ロール）
 
 | role_id | 名前 | 専門領域 |
 |---------|------|----------|
@@ -112,6 +113,7 @@ curl -X POST http://localhost:8002/tasks \
 | `lawyer` | 弁護士エージェント | 法律文書・契約書・法的リスク分析 |
 | `accountant` | 税理士エージェント | 税務申告・財務分析・節税対策 |
 | `financial_advisor` | ファイナンシャルアドバイザー | 資産運用・投資計画・FP相談 |
+| `medical_advisor` | 医療アドバイザー | 症状分析・医療情報・受診判断支援 |
 
 ## cocoro-sdk との連携
 

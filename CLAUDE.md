@@ -162,3 +162,16 @@ curl http://localhost:8002/agents/researcher/personality \
 |            | - `POST /tasks`: `role_id` フィールドでロール指定・system_prompt自動適用 |
 |            | - `GET /roles`: ロール一覧・詳細API追加 |
 |            | - `_forward_to_node()`: 将来の複数miniPC転送設計実装 |
+| 2026-03-14 | **v1.0.0 リリース** |
+|            | - 6ロール目（medical_advisor）追加 |
+|            | - SSEリアルタイムストリーミング安定化 |
+|            | - ファイル処理パイプライン（PDF/TXT/CSV）: `POST /tasks/with-file` |
+|            | - タスクスケジューラー（APScheduler）: `GET/POST /schedules` |
+|            | - アウトプット形式指定（markdown/json/slides/email）|
+|            | - タスクエクスポート（PDF/MD/JSON）: `GET /tasks/{id}/export` |
+|            | - グループ化タスク一覧: `GET /tasks/grouped` |
+|            | - 意図確認API: `POST /tasks/clarify` |
+|            | - Prometheusメトリクス: `GET /stats/metrics` |
+|            | - ノード間リレー通信: `POST /relay/{nodeId}/tasks` |
+|            | - CHANGELOG.md 追加 |
+|            | - README v1.0.0バッジ更新 |

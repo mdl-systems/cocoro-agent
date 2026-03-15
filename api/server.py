@@ -74,11 +74,12 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
 # webhook_registrations テーブルは WEBHOOK_INIT_SQL (core.webhook) で追加作成する
 
 
-# ── Node Auto-Registration ────────────────────────────────────────────────
+# ── Node Auto-Registration & Heartbeat ────────────────────────────────────
 
-async def _register_to_core() -> None:
+async def _register_to_core() -> str | None:
     """起動時にcocoro-coreへこのノードを自動登録する。
     
+    登録成功時は node_id 文字列を返す。
     cocoro-coreが /nodes/register エンドポイントを持っていない場合でも
     エラーをログに記録するだけで起動は継続する。
     """
@@ -93,7 +94,7 @@ async def _register_to_core() -> None:
     port      = int(os.getenv("AGENT_PORT", "8002"))
     api_key   = os.getenv("COCORO_API_KEY", COCORO_API_KEY)
 
-    # 自ホストのIPを取得（Docker環境ではコンテナIPになる）
+    # 自ホストのIPを取得（Docker環境ではコンテナーIPになる）
     try:
         host_ip = socket.gethostbyname(socket.gethostname())
     except Exception:
@@ -105,7 +106,7 @@ async def _register_to_core() -> None:
         "port":     port,
         "roles":    roles,
         "name":     node_name,
-        "version":  "1.0.0",
+        "version":  "1.0.1",
     }
 
     try:
@@ -117,9 +118,10 @@ async def _register_to_core() -> None:
             )
         if resp.status_code < 300:
             logger.info(
-                "Node registered to core: node_id=%s ip=%s roles=%s",
-                node_id, host_ip, roles,
+                "Node registered to core: node_id=%s ip=%s port=%d roles=%s",
+                node_id, host_ip, port, roles,
             )
+            return node_id
         elif resp.status_code == 404:
             # cocoro-coreが /nodes/register を未実装でも問題なし
             logger.debug("cocoro-core: /nodes/register not found (skipped)")
@@ -131,6 +133,42 @@ async def _register_to_core() -> None:
     except Exception as exc:
         # 接続失敗は警告のみ（起動継続）
         logger.warning("Node auto-registration failed (will retry on restart): %s", exc)
+    return None
+
+
+async def _node_heartbeat(node_id: str) -> None:
+    """30秒ごとに PUT {core_url}/nodes/{node_id}/health を送るヘルスビートタスク。
+
+    失敗時は警告ログのみで継続する。
+    """
+    import asyncio
+    core_url = os.getenv("COCORO_CORE_URL", COCORO_CORE_URL)
+    api_key  = os.getenv("COCORO_API_KEY", COCORO_API_KEY)
+    port     = int(os.getenv("AGENT_PORT", "8002"))
+
+    while True:
+        try:
+            await asyncio.sleep(30)  # 30秒ごと
+            async with httpx.AsyncClient(timeout=5) as client:
+                resp = await client.put(
+                    f"{core_url}/nodes/{node_id}/health",
+                    json={"status": "online", "port": port},
+                    headers={"Authorization": f"Bearer {api_key}"},
+                )
+            if resp.status_code < 300:
+                logger.debug("Heartbeat sent: node_id=%s status=online", node_id)
+            elif resp.status_code == 404:
+                logger.debug("Heartbeat: /nodes/%s/health not found (skipped)", node_id)
+            else:
+                logger.warning(
+                    "Heartbeat returned %d for node_id=%s",
+                    resp.status_code, node_id,
+                )
+        except asyncio.CancelledError:
+            logger.info("Heartbeat task cancelled for node_id=%s", node_id)
+            break
+        except Exception as exc:
+            logger.warning("Heartbeat failed for node_id=%s: %s", node_id, exc)
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────
@@ -187,8 +225,23 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(sender.auto_register_console(CONSOLE_URL))
         logger.info("Queued auto-registration to console: %s", CONSOLE_URL)
 
-    # cocoro-core へのノード自動登録
-    asyncio.create_task(_register_to_core())
+    # cocoro-core へのノード自動登録 + ヘルスビート起動
+    async def _register_and_start_heartbeat():
+        registered_node_id = await _register_to_core()
+        if registered_node_id:
+            # 登録成功後にヘルスビート開始
+            hb_task = asyncio.create_task(_node_heartbeat(registered_node_id))
+            app.state.heartbeat_task = hb_task
+            logger.info("Heartbeat started for node_id=%s (interval=30s)", registered_node_id)
+        else:
+            # 登録失敗時も環境変数からnode_idを取得して試みる
+            fallback_id = os.getenv("NODE_ID")
+            if fallback_id:
+                hb_task = asyncio.create_task(_node_heartbeat(fallback_id))
+                app.state.heartbeat_task = hb_task
+                logger.info("Heartbeat started (fallback) for node_id=%s (interval=30s)", fallback_id)
+
+    asyncio.create_task(_register_and_start_heartbeat())
 
     # スロータスク自動監視 (5分ごと)
     async def _slow_task_watchdog():
@@ -210,6 +263,10 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     watchdog_task.cancel()
+    # ノードヘルスビートタスクをキャンセル
+    heartbeat_task = getattr(app.state, "heartbeat_task", None)
+    if heartbeat_task:
+        heartbeat_task.cancel()
     await task_scheduler.stop()
     if hasattr(pool, "close"):
         await pool.close()

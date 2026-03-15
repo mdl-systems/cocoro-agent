@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.0.2] - 2026-03-15
+
+### Added
+- **30秒ヘルスビート** (`api/server.py`): `_node_heartbeat()` — 起動後に `PUT {COCORO_CORE_URL}/nodes/{node_id}/health` を30秒ごとに送信
+  - バックグラウンドタスク（`asyncio.create_task`）で実行
+  - cocoro-coreが未実装（404）・接続失敗でも警告ログのみで継続
+  - シャットダウン時に `heartbeat_task.cancel()` で安全に停止
+- **`_register_to_core()` 改良**: 登録成功時に `node_id` を返すよう変更
+  - 登録成功後に自動でヘルスビートを開始する `_register_and_start_heartbeat()` ラッパーを追加
+  - 登録失敗時も環境変数 `NODE_ID` からフォールバックしてヘルスビートを試みる
+
+### Changed
+- `_register_to_core()` の戻り値: `None` → `str | None`（登録成功時に node_id を返す）
+- payload の `version` を `"1.0.1"` に更新
+- ログ出力に `port` 情報を追加
+
+---
+
 ## [1.0.1] - 2026-03-15
 
 ### Added

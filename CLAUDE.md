@@ -138,7 +138,12 @@ curl http://localhost:8002/agents/researcher/personality \
 |--------|-----------|------|
 | `COCORO_CORE_URL` | `http://localhost:8001` | cocoro-coreのURL |
 | `COCORO_API_KEY` | `cocoro-dev-2026` | Bearer認証キー |
+| `GEMINI_API_KEY` | （必須） | Gemini APIキー |
+| `GEMINI_MODEL` | `gemini-2.5-flash` | Geminiモデル名 |
 | `AGENT_PORT` | `8002` | このサービスのポート |
+| `NODE_ID` | `minipc-a` | ノード識別子（複数miniPC構成時） |
+| `NODE_NAME` | `cocoro-agent-node` | ノード表示名 |
+| `AGENT_ROLES` | 全ロール | 担当ロール（カンマ区切り） |
 | `WEBHOOK_SECRET` | `cocoro-webhook-secret` | HMAC-SHA256署名キー |
 | `DATABASE_URL` | （未設定=FakeDB） | PostgreSQL接続URL |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis（未設定=SSEはlong-poll） |
@@ -175,3 +180,7 @@ curl http://localhost:8002/agents/researcher/personality \
 |            | - ノード間リレー通信: `POST /relay/{nodeId}/tasks` |
 |            | - CHANGELOG.md 追加 |
 |            | - README v1.0.0バッジ更新 |
+| 2026-03-15 | **2台目ノード対応・自動登録** |
+|            | - `api/server.py`: `_register_to_core()` 起動時自動ノード登録実装 |
+|            | - `infra/docker/.env`: `NODE_ID=minipc-engineer` 等ノード設定を追加 |
+|            | - 環境変数テーブル更新（GEMINI_*/NODE_*/AGENT_ROLES追加） |

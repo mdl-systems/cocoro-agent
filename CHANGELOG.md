@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.0.1] - 2026-03-15
+
+### Added
+- **起動時自動ノード登録** (`api/server.py`): `_register_to_core()` — cocoro-coreの `/nodes/register` へ起動時にPOST
+  - `node_id`, `ip`, `port`, `roles`, `name`, `version` を送信
+  - cocoro-coreが未実装（404）・接続失敗でも起動継続（警告ログのみ）
+  - `socket.gethostbyname()` でコンテナIPを自動取得
+
+### Fixed
+- **NODE_ID が反映されない問題**: `infra/docker/.env` に `NODE_ID=minipc-engineer` 等を明示的に追加
+  - `.env.example` のNODE_IDが2箇所ある問題を整理
+  - docker-compose.yml の `${NODE_ID:-minipc-a}` が `.env` の値で正しく上書きされることを確認
+
+### Changed
+- `infra/docker/.env`: `GEMINI_API_KEY`, `GEMINI_MODEL`, `NODE_ID`, `NODE_NAME`, `AGENT_ROLES` セクションを追加
+- `api/middleware.py`: APIキーをモジュールロード時ではなくリクエスト時に動的取得（テスト安定性向上）
+- 環境変数ドキュメント（CLAUDE.md）を最新状態に更新
+
+---
+
 ## [1.0.0] - 2026-03-14
 
 ### Added

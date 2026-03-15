@@ -5,6 +5,7 @@ Port: 8002 (cocoro-core is 8001)
 from __future__ import annotations
 import logging
 import os
+import socket
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -73,6 +74,65 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
 # webhook_registrations テーブルは WEBHOOK_INIT_SQL (core.webhook) で追加作成する
 
 
+# ── Node Auto-Registration ────────────────────────────────────────────────
+
+async def _register_to_core() -> None:
+    """起動時にcocoro-coreへこのノードを自動登録する。
+    
+    cocoro-coreが /nodes/register エンドポイントを持っていない場合でも
+    エラーをログに記録するだけで起動は継続する。
+    """
+    import asyncio
+    await asyncio.sleep(3)  # サーバー起動完了を待つ
+
+    core_url  = os.getenv("COCORO_CORE_URL", COCORO_CORE_URL)
+    node_id   = os.getenv("NODE_ID", "minipc-a")
+    node_name = os.getenv("NODE_NAME", "cocoro-agent-node")
+    roles_str = os.getenv("AGENT_ROLES", "")
+    roles     = [r.strip() for r in roles_str.split(",") if r.strip()]
+    port      = int(os.getenv("AGENT_PORT", "8002"))
+    api_key   = os.getenv("COCORO_API_KEY", COCORO_API_KEY)
+
+    # 自ホストのIPを取得（Docker環境ではコンテナIPになる）
+    try:
+        host_ip = socket.gethostbyname(socket.gethostname())
+    except Exception:
+        host_ip = "127.0.0.1"
+
+    payload = {
+        "node_id":  node_id,
+        "ip":       host_ip,
+        "port":     port,
+        "roles":    roles,
+        "name":     node_name,
+        "version":  "1.0.0",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.post(
+                f"{core_url}/nodes/register",
+                json=payload,
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+        if resp.status_code < 300:
+            logger.info(
+                "Node registered to core: node_id=%s ip=%s roles=%s",
+                node_id, host_ip, roles,
+            )
+        elif resp.status_code == 404:
+            # cocoro-coreが /nodes/register を未実装でも問題なし
+            logger.debug("cocoro-core: /nodes/register not found (skipped)")
+        else:
+            logger.warning(
+                "Node registration returned %d: %s",
+                resp.status_code, resp.text[:200],
+            )
+    except Exception as exc:
+        # 接続失敗は警告のみ（起動継続）
+        logger.warning("Node auto-registration failed (will retry on restart): %s", exc)
+
+
 # ── Lifespan ──────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -120,14 +180,17 @@ async def lifespan(app: FastAPI):
     app.state.webhook_sender = sender
     app.state.scheduler      = task_scheduler
 
+    import asyncio
+
     # cocoro-console へのWebhook自動登録
     if CONSOLE_URL:
-        import asyncio
         asyncio.create_task(sender.auto_register_console(CONSOLE_URL))
         logger.info("Queued auto-registration to console: %s", CONSOLE_URL)
 
+    # cocoro-core へのノード自動登録
+    asyncio.create_task(_register_to_core())
+
     # スロータスク自動監視 (5分ごと)
-    import asyncio
     async def _slow_task_watchdog():
         while True:
             try:
